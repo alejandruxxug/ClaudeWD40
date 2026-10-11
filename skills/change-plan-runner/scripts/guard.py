@@ -9,7 +9,8 @@ session. It denies anything that leaves the machine or destroys work:
   `npm run build:prod` -> `... && firebase deploy`), destructive git, data drops,
   recursive deletes outside the project, sudo.
 - Edit/Write: anything under .claude/ (settings, this guard), .git/, or outside
-  the project and the temp dirs.
+  the project and the temp dirs. The one exception is this project's memory
+  folder (~/.claude/projects/<slug>/memory/*.md), so learnings get saved.
 - Browser navigation: only localhost-style hosts, plus hosts the user lists in
   .claude/change-plan-runner.json {"allowedHosts": [...]}.
 - Any other tool whose name says deploy/publish/delete/... (MCP servers).
@@ -165,6 +166,8 @@ def check_bash(command, cwd, project, depth=0):
                 full = expanded if os.path.isabs(expanded) else os.path.join(cwd, expanded)
                 if recursive and os.path.realpath(full) in (project, os.path.expanduser("~")):
                     return "it deletes the whole project or home directory"
+                if not recursive and is_memory_file(os.path.realpath(full), project):
+                    continue  # dropping a memory that turned out wrong
                 if not inside(full, roots):
                     return f"it deletes `{target}`, outside the project"
     return None
@@ -207,10 +210,25 @@ def expand_target(target, shell_vars):
 
 # --- Edit / Write -------------------------------------------------------------
 
+def memory_dir(project):
+    """This project's auto-memory folder, the one exception under .claude/. Claude
+    Code names it after the project path with every non-alphanumeric character
+    turned into `-`."""
+    slug = re.sub(r"[^A-Za-z0-9]", "-", project)
+    return os.path.realpath(os.path.expanduser(f"~/.claude/projects/{slug}/memory"))
+
+
+def is_memory_file(full, project):
+    # Flat .md files only: no subfolders, nothing else in .claude/.
+    return os.path.dirname(full) == memory_dir(project) and full.endswith(".md")
+
+
 def check_write(file_path, project):
     if not file_path:
         return "no file path given"
     full = os.path.realpath(os.path.expanduser(file_path))
+    if is_memory_file(full, project):
+        return None
     parts = full.split(os.sep)
     if ".claude" in parts:
         return "files under .claude/ (settings, skills, this guard) are off-limits during a run"
@@ -354,6 +372,8 @@ def self_test():
         if r:
             print(f"FAIL (should allow): {c} -> {r}"); fails += 1
 
+    mem = memory_dir(os.path.realpath(proj))
+
     def tool(name, **inp):
         return decide({"tool_name": name, "tool_input": inp, "cwd": proj})
     checks = [
@@ -362,6 +382,15 @@ def self_test():
         (tool("Edit", file_path=os.path.expanduser("~/.zshrc")), True),
         (tool("Edit", file_path=f"{proj}/.git/config"), True),
         (tool("Write", file_path=f"{proj}/docs/change-reports/r.md"), False),
+        (tool("Write", file_path=f"{mem}/MEMORY.md"), False),
+        (tool("Edit", file_path=f"{mem}/new-fact.md"), False),
+        (tool("Write", file_path=f"{mem}/sub/x.md"), True),
+        (tool("Write", file_path=f"{mem}/hook.sh"), True),
+        (tool("Write", file_path=os.path.expanduser("~/.claude/projects/-other-proj/memory/x.md")), True),
+        (tool("Write", file_path=os.path.expanduser("~/.claude/settings.json")), True),
+        (bash(f"rm {mem}/stale-fact.md"), False),
+        (bash(f"rm -rf {mem}"), True),
+        (bash(f"rm -r {mem}/x.md"), True),
         (tool("mcp__claude-in-chrome__navigate", url="http://localhost:3000/login"), False),
         (tool("mcp__claude-in-chrome__navigate", url="127.0.0.1:5173"), False),
         (tool("mcp__claude-in-chrome__navigate", url="https://console.firebase.google.com"), True),

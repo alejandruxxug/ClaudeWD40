@@ -37,7 +37,9 @@ session** and denies:
   `rm -rf "$d/node_modules"` passes when every value stays inside the project; a
   variable it can't resolve (`$(…)`, one set in an earlier call) is blocked.
 - **Escaping the project:** writes to `.claude/` (settings, the guard itself),
-  `.git/`, or anywhere outside the project and temp dirs.
+  `.git/`, or anywhere outside the project and temp dirs. The one exception is
+  this project's memory folder (`~/.claude/projects/<slug>/memory/*.md`): the run
+  may add, update or delete memories there.
 - **Leaving localhost in the browser:** navigation only to local hosts (plus
   hosts the user lists in `.claude/change-plan-runner.json`
   `{"allowedHosts": [...]}`).
@@ -250,13 +252,18 @@ local — the user reviews first and decides what survives and when it ships. Re
    only bundles; the guard blocks any that deploy) with every change in place. A
    failed build is a defect: fix it in a separate `fix` commit, then build again.
 2. Stop the dev server and close the tabs you opened.
-3. Write the full report using `references/report-template.md` to
+3. Save to memory what a future session needs and the repo doesn't record,
+   following the session's memory rules: e.g. a gotcha in the test setup, a
+   decision the user made in the question round that applies beyond this plan, or
+   deploys the user still has to do. Update an existing memory rather than adding
+   a duplicate.
+4. Write the full report using `references/report-template.md` to
    `docs/change-reports/YYYY-MM-DD-<plan-slug>.md` (or the repo's existing docs
    folder if it uses another layout). Leave it **uncommitted**.
-4. Reply in chat with a short summary: one or two lines per change (what, how,
+5. Reply in chat with a short summary: one or two lines per change (what, how,
    commit hash, test verdict), then the **"for you to verify after deploy"** items,
    anything the guard blocked,
    the open findings, and the report path. Keep it short — the report holds the
    detail.
-5. Tell the user that nothing has been pushed or deployed, and how to drop a change
+6. Tell the user that nothing has been pushed or deployed, and how to drop a change
    they reject (`git revert <hash>`, or rebase it out locally).
