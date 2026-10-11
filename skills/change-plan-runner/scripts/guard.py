@@ -73,6 +73,11 @@ NPM_BUILTINS = {"install", "i", "ci", "test", "t", "exec", "x", "ls", "list", "v
                 "prune", "dedupe", "link", "pack", "explain", "doctor", "root", "bin"}
 
 RM_RE = re.compile(r"(?:^|[\s;&|(])rm\s+((?:-[^\s]*\s+)*)(.+?)(?=$|[;&|)])")
+# Shell variables the command itself defines, so `rm -rf "$d/node_modules"` can be
+# judged by what $d holds: `d=build; ...` or `for d in a b; do ...`.
+ASSIGN_RE = re.compile(r"""(?:^|[\s;&|(])(\w+)=("[^"$`]*"|'[^']*'|[^\s;&|()$`'"]+)(?=$|[\s;&|)])""")
+FOR_RE = re.compile(r"""\bfor\s+(\w+)\s+in\s+(.+?)\s*;\s*do\b""", re.S)
+SHELL_VAR_RE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
 
 
 def project_dir(payload):
@@ -146,21 +151,58 @@ def check_bash(command, cwd, project, depth=0):
                     return f"`{name}` runs `{hook}` and {inner}"
 
     roots = safe_roots(project)
+    shell_vars = command_vars(command)
     for m in RM_RE.finditer(command):
         flags, args = m.group(1), m.group(2)
         recursive = re.search(r"-\S*[rR]", flags) or "--recursive" in flags
         for target in args.split():
             if target.startswith("-"):
                 continue
-            expanded = os.path.expanduser(os.path.expandvars(target))
-            if target in ("/", "~", "*", ".", "..") or "$" in expanded:
-                return f"`rm {target}` is too broad"
-            full = expanded if os.path.isabs(expanded) else os.path.join(cwd, expanded)
-            if recursive and os.path.realpath(full) in (project, os.path.expanduser("~")):
-                return "it deletes the whole project or home directory"
-            if not inside(full, roots):
-                return f"it deletes `{target}`, outside the project"
+            for value in expand_target(target, shell_vars):
+                expanded = os.path.expanduser(os.path.expandvars(value))
+                if value in ("/", "~", "*", ".", "..") or "$" in expanded or "`" in expanded:
+                    return f"`rm {target}` is too broad"
+                full = expanded if os.path.isabs(expanded) else os.path.join(cwd, expanded)
+                if recursive and os.path.realpath(full) in (project, os.path.expanduser("~")):
+                    return "it deletes the whole project or home directory"
+                if not inside(full, roots):
+                    return f"it deletes `{target}`, outside the project"
     return None
+
+
+def unquote(s):
+    return s[1:-1] if len(s) >= 2 and s[0] == s[-1] and s[0] in "'\"" else s
+
+
+def command_vars(command):
+    """Values the command assigns to its own variables. A name assigned more than
+    once keeps every value, and each one is checked."""
+    found = {}
+    for m in ASSIGN_RE.finditer(command):
+        found.setdefault(m.group(1), []).append(unquote(m.group(2)))
+    for m in FOR_RE.finditer(command):
+        found.setdefault(m.group(1), []).extend(unquote(w) for w in m.group(2).split())
+    return found
+
+
+def expand_target(target, shell_vars):
+    """Every path `target` can be once the command's own variables are filled in.
+    Unknown variables stay as `$x` and are rejected by the caller."""
+    values = [unquote(target)]
+    for _ in range(4):  # one variable per pass: "$a/$b" takes two
+        nxt = []
+        for v in values:
+            m = next((m for m in SHELL_VAR_RE.finditer(v)
+                      if (m.group(1) or m.group(2)) in shell_vars), None)
+            if not m:
+                nxt.append(v)
+                continue
+            for val in shell_vars[m.group(1) or m.group(2)]:
+                nxt.append(v[:m.start()] + val + v[m.end():])
+        if nxt == values:
+            break
+        values = nxt[:64]
+    return values
 
 
 # --- Edit / Write -------------------------------------------------------------
@@ -244,10 +286,8 @@ def main():
         reason = f"guard could not parse the call ({e})"
     if reason:
         sys.stderr.write(
-            f"change-plan-runner guard blocked this: {reason}. Unattended runs never "
-            "push, deploy, publish or destroy work. Don't retry or work around it: "
-            "test locally or with the harness, and add it to the report's "
-            '"For you to verify" section for the user.\n')
+            f"change-plan-runner guard: blocked, {reason}. Don't retry or work "
+            'around it; list it under "For you to verify" in the report.\n')
         sys.exit(DENY_EXIT)
     sys.exit(0)
 
@@ -287,13 +327,19 @@ def self_test():
         "bash -c 'firebase deploy'", "echo cpr-guard-canary && firebase deploy --dry-run",
         "git remote set-url origin x", "gsutil cors set cors.json gs://b",
         "git commit -m 'x' && git push", "heroku apps:destroy x",
+        'rm -rf "$UNKNOWN/node_modules"', 'd=/Users/someone; rm -rf "$d/node_modules"',
+        'for d in a /etc; do rm -rf "$d/node_modules"; done', 'd=..; rm -rf "$d"',
+        'rm -rf "$(pwd)/x"', 'for d in $(ls); do rm -rf "$d"; done', 'd=$HOME; rm -rf "$d"',
     ]
     allowed = [
         "npm start", "npm test -- --watchAll=false", "npm run build", "npm run lint",
         "npm ci", "npm install", "git status", "git add -A", "git commit -m 'feat: x'",
         "git checkout -b feat/x origin/dev", "git fetch origin", "git log --oneline",
         "git diff", "git revert abc123", "rm -rf build", f"rm -rf {proj}/node_modules/.cache",
-        "rm -f /tmp/x.log", "ls -la", "python3 -m pytest", "firebase emulators:exec 'jest'",
+        "rm -f /tmp/x.log", "ls -la",
+        'for d in intakePqrsd handlePqrsd; do rm -rf "$d/node_modules"; done',
+        f'D={proj}/functions; rm -rf "$D/node_modules"', "d=build; rm -rf ${d}/cache",
+        'a=src; b=gen; rm -rf "$a/$b"', "python3 -m pytest", "firebase emulators:exec 'jest'",
         "vercel dev", "gcloud config get-value project", "firebase --version",
         "git commit -m 'fix(x): remove heroku leftovers'",
         'git commit -m "feat: push notifications; firebase deploy docs"',

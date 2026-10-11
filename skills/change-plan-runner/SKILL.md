@@ -6,7 +6,7 @@ hooks:
     - matcher: "*"
       hooks:
         - type: command
-          command: "sh -c 'command -v python3 >/dev/null 2>&1 || { echo \"change-plan-runner guard: python3 not found, blocking all tools\" >&2; exit 2; }; for d in \"${CLAUDE_SKILL_DIR}\" \"$CLAUDE_PROJECT_DIR/.claude/skills/change-plan-runner\" \"$HOME/.claude/skills/change-plan-runner\"; do if [ -n \"$d\" ] && [ -f \"$d/scripts/guard.py\" ]; then python3 \"$d/scripts/guard.py\" && exit 0; exit 2; fi; done; echo \"change-plan-runner guard: guard.py not found, blocking all tools\" >&2; exit 2'"
+          command: 'python3 "${CLAUDE_SKILL_DIR:-$HOME/.claude/skills/change-plan-runner}/scripts/guard.py" || exit 2'
 ---
 
 # Change plan runner
@@ -32,7 +32,10 @@ session** and denies:
   anything named deploy/release/publish/prod is blocked by name. Same for `make`.
 - **Destroying work:** `git reset --hard`, `git clean`, forced checkouts, branch
   deletes, stash drops, remote changes; recursive deletes outside the project;
-  `sudo`; database drops/resets.
+  `sudo`; database drops/resets. An `rm` target with a variable is judged by what
+  the command itself assigns it (`d=build; …` or `for d in a b; do …`), so
+  `rm -rf "$d/node_modules"` passes when every value stays inside the project; a
+  variable it can't resolve (`$(…)`, one set in an earlier call) is blocked.
 - **Escaping the project:** writes to `.claude/` (settings, the guard itself),
   `.git/`, or anywhere outside the project and temp dirs.
 - **Leaving localhost in the browser:** navigation only to local hosts (plus
@@ -42,6 +45,8 @@ session** and denies:
   subagents (their tool calls may not pass through skill hooks).
 
 It **fails closed**: if Python or the script is missing, every tool is blocked.
+The hook command is kept to one short line on purpose, because the harness echoes
+it in front of every block message.
 
 When the guard blocks something, that is the design working. Don't retry it, don't
 look for another command that does the same thing, and don't ask the user to turn it
@@ -165,10 +170,10 @@ the user only for what needs them (a password, an OTP, clicking "Allow" in Chrom
 | # | Check | How | If it fails |
 |---|-------|-----|-------------|
 | 1 | **Git** | `git status` clean; `git fetch origin`; `git checkout -b <type>/<plan-slug> origin/<integration branch>` | Uncommitted work: ask. Never stash or discard it on your own. |
-| 2 | **Dependencies** | Packages installed and matching the lockfile (install if not); local env files the dev server needs exist | Missing env file: ask the user. Never invent credentials. |
+| 2 | **Dependencies** | Packages installed and matching the lockfile (install if not); local env files the dev server needs exist. Tools needed only to *run* something locally (e.g. `@google-cloud/functions-framework` for one Cloud Function) go in the scratchpad (`npm init -y && npm install <tool>` there, then call its `node_modules/.bin/…` by path), **never** `npm install` inside a function or package folder: a stray `node_modules` there shadows the root one and broke the backend test harness in an earlier run | Missing env file: ask the user. Never invent credentials. |
 | 3 | **Test harness baseline** | Run every relevant test command from the profile once, plus the tooling it needs (`--version` checks) | Record the tests that **already fail** before any change, so they aren't blamed on the run. Missing tooling: tell the user now. |
 | 4 | **Dev server** | Start it in the background; wait until it compiles without errors and the URL responds | Port busy: reuse the server if it's this repo's, otherwise ask. |
-| 5 | **Browser connected** | Prefer Claude in Chrome: load its tools in **one** ToolSearch call (tabs_context_mcp, tabs_create_mcp, navigate, computer, read_page, find, form_input, javascript_tool, read_console_messages, read_network_requests, tabs_close_mcp, list_connected_browsers); call `tabs_context_mcp`; open a fresh tab on the dev URL. If it isn't installed, use whatever browser automation the session has (built-in browser, Playwright MCP) and map the checks below onto it | Extension unreachable or several browsers: ask the user to connect or pick one. No browser tooling at all: say so now, because every change will then be harness-only. |
+| 5 | **Browser connected** | Prefer Claude in Chrome: load its tools in **one** ToolSearch call (tabs_context_mcp, tabs_create_mcp, navigate, computer, read_page, find, form_input, javascript_tool, read_console_messages, read_network_requests, tabs_close_mcp, list_connected_browsers); call `tabs_context_mcp`; open a fresh tab on the dev URL. If it isn't installed, use whatever browser automation the session has (built-in browser, Playwright MCP) and map the checks below onto it | Extension unreachable or several browsers: ask the user to connect or pick one. Tabs don't open, or calls act on an old tab group from a previous session: call `list_connected_browsers` and switch to the other connected browser before asking the user (that fixed it once). No browser tooling at all: say so now, because every change will then be harness-only. |
 | 6 | **Site permission** | Do one real action on localhost (click, read the page, run a short `javascript_tool` snippet) | Permission prompt: the user approves it **now**, not mid-run. |
 | 7 | **Logged in** | Log in as every test account the plan needs; confirm the start screen loads with that role's menus | OTP, password or captcha: the user enters it now. Note which tab or session holds which role. |
 | 8 | **Console baseline** | `read_console_messages` with an error pattern on the start screen | Record existing errors and warnings, so later checks only flag new ones. |
@@ -215,6 +220,15 @@ Never trigger `alert`/`confirm` dialogs — they freeze the extension. If one is
 unavoidable, say so in the report and leave it for the user.
 
 ### 3. Fix, then test again
+**Measure, don't guess.** Before fixing a bug you can't explain, instrument it until
+the cause is observed, not inferred: log or poll the state over time (e.g. a
+`javascript_tool` snippet that samples the DOM every 100 ms during the action),
+inspect the network request and response, add a temporary `console.log` around the
+suspect code. A fix built on a guess often hides the symptom and leaves the bug; in
+an earlier run, sampling the page every 100 ms showed that a vanishing save message came
+from Firestore remounting the page before the save finished. Remove the
+instrumentation before committing.
+
 Each problem found: fix it, then repeat the checks that found it **plus** the happy
 path (fixes break things). Loop until clean. If an issue is out of scope or a
 judgment call, don't silently expand scope — note it in the report as a finding.
