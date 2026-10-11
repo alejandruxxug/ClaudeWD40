@@ -1,6 +1,12 @@
 ---
 name: change-plan-runner
-description: Run a list of planned changes end to end, unattended, in any web project. Ask every clarifying question up front (each option explained with an example of what happens next), set up and prove a test environment (harness, dev server, connected Chrome, logins) before the user leaves, then for each change implement → test on localhost in Chrome (verify output, hunt edge cases and breaking points) → fix → retest → one local commit, narrating along the way. Finish with a short summary plus a full .md report, including anything the user must verify themselves. Use this whenever the user sends a list or plan of several changes/fixes/features to work through, says things like "here's the plan", "go through these changes", "leave it running", "test each one in chrome and commit separately", or asks for a change-by-change report — even if they don't name the skill.
+description: Run a list of planned changes end to end, unattended and sandboxed, in any web project. A guard hook blocks every push, deploy, publish, prod/dev build-and-deploy script and destructive command for the rest of the session, so the user can walk away. Ask every clarifying question up front (each option explained with an example of what happens next), set up and prove a test environment (harness, dev server, connected Chrome, logins) before the user leaves, then for each change implement → test on localhost in Chrome (verify output, hunt edge cases and breaking points) → fix → retest → one local commit, narrating along the way. Finish with a short summary plus a full .md report, including anything the user must verify themselves. Use this whenever the user sends a list or plan of several changes/fixes/features to work through, says things like "here's the plan", "go through these changes", "leave it running", "test each one in chrome and commit separately", or asks for a change-by-change report — even if they don't name the skill.
+hooks:
+  PreToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: "sh -c 'command -v python3 >/dev/null 2>&1 || { echo \"change-plan-runner guard: python3 not found, blocking all tools\" >&2; exit 2; }; for d in \"${CLAUDE_SKILL_DIR}\" \"$CLAUDE_PROJECT_DIR/.claude/skills/change-plan-runner\" \"$HOME/.claude/skills/change-plan-runner\"; do if [ -n \"$d\" ] && [ -f \"$d/scripts/guard.py\" ]; then python3 \"$d/scripts/guard.py\" && exit 0; exit 2; fi; done; echo \"change-plan-runner guard: guard.py not found, blocking all tools\" >&2; exit 2'"
 ---
 
 # Change plan runner
@@ -9,6 +15,44 @@ The user hands over a list of changes and wants to walk away while you work thro
 it. Everything here serves one goal: when they come back, each change is done,
 proven in the running app, isolated in its own commit, and explained well enough
 that they can decide what to keep without re-deriving your work.
+
+## The sandbox: nothing leaves the machine
+
+The user only walks away if they trust that the run can't hurt anything. So this
+skill ships a guard (`scripts/guard.py`, registered as a `PreToolUse` hook in the
+frontmatter). Once the skill is invoked, the guard stays on **for the rest of the
+session** and denies:
+
+- **Leaving the machine:** `git push`, PRs/merges/releases, package publishing,
+  image pushes, every deploy CLI (firebase, gcloud, aws, vercel, netlify, wrangler,
+  fly, heroku, terraform, kubectl, …).
+- **Scripts that deploy:** `npm|yarn|pnpm|bun run <x>` is resolved through
+  `package.json` (including `pre`/`post` hooks and nested scripts), so `build:dev`
+  or `build:prod` that end in `firebase deploy` are blocked by what they *do*, and
+  anything named deploy/release/publish/prod is blocked by name. Same for `make`.
+- **Destroying work:** `git reset --hard`, `git clean`, forced checkouts, branch
+  deletes, stash drops, remote changes; recursive deletes outside the project;
+  `sudo`; database drops/resets.
+- **Escaping the project:** writes to `.claude/` (settings, the guard itself),
+  `.git/`, or anywhere outside the project and temp dirs.
+- **Leaving localhost in the browser:** navigation only to local hosts (plus
+  hosts the user lists in `.claude/change-plan-runner.json`
+  `{"allowedHosts": [...]}`).
+- **Side doors:** MCP tools named deploy/publish/delete/merge/send-email/…, and
+  subagents (their tool calls may not pass through skill hooks).
+
+It **fails closed**: if Python or the script is missing, every tool is blocked.
+
+When the guard blocks something, that is the design working. Don't retry it, don't
+look for another command that does the same thing, and don't ask the user to turn it
+off mid-run. Note what you were trying to do and put it in the report's "For you to
+verify / do" section. False positives cost one line in the report; a single
+unwanted deploy costs the user's trust in the whole idea.
+
+The guard is a seatbelt, not permission. Even where it can't see (clicks inside the
+app on dev data), behave as if it could: create your own test records with a
+recognizable prefix (e.g. `[TEST]`), don't delete or edit records you didn't create,
+and send emails only to test addresses the user approved.
 
 ## Phase 0 — Learn the project, then ask everything at once
 
@@ -73,12 +117,10 @@ means the run stalls or you guess, so front-load them.
    Phrase these the same way, with the consequence of each answer:
    - **Test accounts** in Chrome (which user/role to log in as; several roles if
      permissions are involved).
-   - **Backend changes**: may you deploy backend code (functions, APIs) to the
-     **dev** environment to test it from localhost? *Example: "Yes": after change 2
-     I deploy the changed function to dev and test the new filter in Chrome against
-     it. "No": I cover it with the backend test harness only, and the report lists
-     it under "for you to verify".*
-   - **Writes to dev data** while testing (creating records, sending dev emails) — OK?
+   - **Writes to dev data** while testing (creating `[TEST]` records, sending
+     emails to test addresses). *Example: "Yes": I create a few `[TEST]` records
+     in the dev database from localhost and leave them for you to delete. "No": I
+     test only screens that read data, and the report lists the rest for you.*
    - **Local build**, asked only when the plan touches build config, env vars,
      routing or dependencies. *Example: "Yes": after the last change I run the
      production build locally to prove the bundle compiles with every change;
@@ -86,11 +128,19 @@ means the run stalls or you guess, so front-load them.
 4. Restate the plan as a numbered list with your interpretation of each item and the
    order you'll do them (dependencies first).
 
-## Localhost first; no frontend deploys
+## Localhost first; no deploys at all
 
-All browser testing happens on the **local dev server**. Never deploy the frontend
-(hosting, static site, preview channels) as part of this run: a deploy publishes
-every commit on the branch, including ones the user may reject.
+All browser testing happens on the **local dev server**. Nothing gets deployed
+during the run, not the frontend and not the backend, not to dev and not to prod.
+A deploy publishes every commit on the branch, including ones the user may reject,
+and the guard blocks it anyway.
+
+**Backend changes:** if the project can run its backend locally (an emulator suite,
+`functions-framework`, a local API server, Docker), run it and point the local
+frontend at it. That's the localhost way to test backend changes in the browser.
+Otherwise test the backend with the harness (unit, emulator or integration tests;
+write a test for the new behavior) and test the frontend against whatever the dev
+backend already does.
 
 Some things genuinely can't be verified on localhost: e.g. captcha or bot protection
 bound to the real domain, OAuth or email-link redirects, CORS or CSP that only
@@ -122,12 +172,13 @@ the user only for what needs them (a password, an OTP, clicking "Allow" in Chrom
 | 6 | **Site permission** | Do one real action on localhost (click, read the page, run a short `javascript_tool` snippet) | Permission prompt: the user approves it **now**, not mid-run. |
 | 7 | **Logged in** | Log in as every test account the plan needs; confirm the start screen loads with that role's menus | OTP, password or captcha: the user enters it now. Note which tab or session holds which role. |
 | 8 | **Console baseline** | `read_console_messages` with an error pattern on the start screen | Record existing errors and warnings, so later checks only flag new ones. |
-| 9 | **Deploy access** (only if dev backend deploys were allowed) | The deploy CLI (gcloud, firebase, aws, vercel, …) points at the **dev** project and auth is valid | Re-auth needed: the user runs it now with `! <login command>`. |
+| 9 | **Guard active** | Run the harmless canary `echo cpr-guard-canary && firebase deploy --dry-run`. It must come back **blocked** by the change-plan-runner guard; nothing runs either way, because a denied call never executes | Not blocked: the guard isn't registered (skill not invoked via the Skill tool, or hooks are disabled). **Do not hand off.** Tell the user the run would be unguarded and let them decide. |
 
 Finish preflight with a short checklist in chat (✅/⚠️ per row, plus anything you
 recorded as a baseline). Then hand off explicitly, e.g. *"Environment ready: branch
 `feat/requests-export`, dev server on :3000, Chrome logged in as ADMIN and USER,
-2 tests already failing (noted). Starting change 1/5. You can leave."* Don't wait
+2 tests already failing (noted), guard active (canary blocked). Starting change
+1/5. You can leave."* Don't wait
 for another go-ahead after that.
 
 From here on, run without stopping. If something truly blocks a change (a denied
@@ -168,25 +219,29 @@ Each problem found: fix it, then repeat the checks that found it **plus** the ha
 path (fixes break things). Loop until clean. If an issue is out of scope or a
 judgment call, don't silently expand scope — note it in the report as a finding.
 
+Changes that need the backend but couldn't run it locally: test what's possible and
+list the rest under "For you to verify after deploy".
+
 If Chrome tooling fails 2–3 times in a row, stop poking the browser: fall back to
 the harness and code review for that change and list it under "for you to verify".
 
 ### 4. Commit (local only)
 One commit per change, in the project's commit style, body says *why*, with the
-session's attribution trailer. Stage only that change's files. **Never push, never
-open a PR, never deploy the frontend, never touch prod** — the user reviews first
-and decides what survives. Record the short hash for the report.
+session's attribution trailer. Stage only that change's files. The commit stays
+local — the user reviews first and decides what survives and when it ships. Record the short hash for the report.
 
 ## Finish
 
-1. If a local build was allowed, run it now with every change in place. A failed
-   build is a defect: fix it in a separate `fix` commit, then build again.
+1. If a local build was allowed, run the project's plain build script (the one that
+   only bundles; the guard blocks any that deploy) with every change in place. A
+   failed build is a defect: fix it in a separate `fix` commit, then build again.
 2. Stop the dev server and close the tabs you opened.
 3. Write the full report using `references/report-template.md` to
    `docs/change-reports/YYYY-MM-DD-<plan-slug>.md` (or the repo's existing docs
    folder if it uses another layout). Leave it **uncommitted**.
 4. Reply in chat with a short summary: one or two lines per change (what, how,
    commit hash, test verdict), then the **"for you to verify after deploy"** items,
+   anything the guard blocked,
    the open findings, and the report path. Keep it short — the report holds the
    detail.
 5. Tell the user that nothing has been pushed or deployed, and how to drop a change
