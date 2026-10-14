@@ -8,6 +8,7 @@ skills for everyday web development. Spray on, loosen stuck workflows.
 | Skill | What it does |
 |-------|--------------|
 | [`change-plan-runner`](skills/change-plan-runner/SKILL.md) | Hand Claude a list of changes and walk away. It asks every question up front (each option comes with an example of what happens next), sets up and proves a test environment (test harness, dev server, a connected Chrome, logins) while you're still there, then for each change does **change → test on localhost in Chrome → fix → retest → one local commit**. It ends with a short summary and a full Markdown report, including anything only you can verify after a deploy. Nothing is pushed or deployed. |
+| [`pixel-game-studio`](skills/pixel-game-studio/SKILL.md) | Run a small 2D / pixel-art game like a tiny studio. Claude is the producer: an **art** subagent (Opus) draws in Aseprite and mocks every screen in Figma (Figwright), the **user approves the view before any code**, a **builder** (Sonnet) builds it to match, and a **tester** (Sonnet) drives the game through a test backdoor and compares screenshots to the views. Visual bugs loop tester → art (confirms) → builder. Sound is sourced legally (CC0/CC-BY), auditioned by ear, and processed outside the game. Decisions go in a design log in the user's own words. |
 
 ## Sandboxed by design
 
@@ -63,6 +64,7 @@ you can call it by name.
   project's test harness only, and the report says so.
 - A git repo with a dev server that runs locally.
 - `python3` (for the guard).
+- For `pixel-game-studio`: an Aseprite MCP server (`mcp__aseprite__*`) and Figwright (a Figma plugin + MCP, `mcp__figwright__*`) for the art lane; a game that can be built with a test backdoor (the skill tells the builder how).
 
 ## Contributing
 
